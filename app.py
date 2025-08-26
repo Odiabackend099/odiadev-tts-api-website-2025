@@ -1,242 +1,319 @@
 ﻿import os
 import tempfile
 import time
-import hashlib
-import struct
-import math
-from pathlib import Path
+import json
+import traceback
+import numpy as np
+import soundfile as sf
 from datetime import datetime, timezone
 from flask import Flask, request, jsonify, Response
 from flask_cors import CORS
-import logging
 
 app = Flask(__name__)
 CORS(app)
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
 
-class RealNigerianTTS:
-    def __init__(self):
-        self.cache_dir = Path("tts_cache")
-        self.cache_dir.mkdir(exist_ok=True)
-        self.stats = {"total_requests": 0, "cache_hits": 0, "errors": 0}
-        self.engine = self._init_engine()
-        
-        # Nigerian pronunciation mappings
-        self.naija_replacements = {
-            "the": "di", "this": "dis", "that": "dat", "think": "tink",
-            "thing": "ting", "three": "tree", "through": "tru",
-            "birthday": "birfday", "water": "wata", "better": "berra",
-            "computer": "komputa", "internet": "intanet"
-        }
+# API Keys Configuration
+VALID_KEYS_STR = os.getenv("VALID_API_KEYS", "demo")
+VALID_KEYS = set(k.strip() for k in VALID_KEYS_STR.split(",") if k.strip())
+if not VALID_KEYS:
+    VALID_KEYS = {"demo"}
+
+print(f" Loaded {len(VALID_KEYS)} API keys")
+
+# TTS ENGINE HIERARCHY (Best to Fallback)
+TTS_ENGINES = {
+    "edge_available": False,
+    "gtts_available": False,
+    "fallback_available": True
+}
+
+# Try Microsoft Edge TTS (Best Quality)
+try:
+    import edge_tts
+    TTS_ENGINES["edge_available"] = True
+    print(" Edge TTS loaded (Premium Quality)")
+except:
+    print(" Edge TTS not available")
+
+# Try gTTS (Your Current Working System)
+try:
+    from gtts import gTTS
+    TTS_ENGINES["gtts_available"] = True
+    print(" gTTS loaded (Internet Required)")
+except:
+    print(" gTTS not available")
+
+# Nigerian Voice Mapping (Enhanced)
+NIGERIAN_VOICES = {
+    # Edge TTS Voices (Best Quality)
+    "nigerian-female": {"edge": "en-NG-EzinneNeural", "gtts": {"tld": "com", "slow": False}},
+    "nigerian-male": {"edge": "en-NG-AbeolaNeural", "gtts": {"tld": "com", "slow": True}},
+    "yoruba-female": {"edge": "en-NG-EzinneNeural", "gtts": {"tld": "co.uk", "slow": False}},
+    "hausa-male": {"edge": "en-NG-AbeolaNeural", "gtts": {"tld": "com.au", "slow": False}},
+    "igbo-female": {"edge": "en-NG-EzinneNeural", "gtts": {"tld": "ie", "slow": False}},
+    "english-ng": {"edge": "en-NG-EzinneNeural", "gtts": {"tld": "com", "slow": False}}
+}
+
+def check_auth():
+    """Authentication check"""
+    try:
+        api_key = (
+            request.headers.get("x-api-key") or 
+            request.headers.get("X-API-Key") or
+            request.args.get("api_key") or
+            request.form.get("api_key") or
+            "demo"
+        )
+        return api_key in VALID_KEYS
+    except:
+        return True  # Fail open for demo
+
+async def generate_edge_speech(text, voice="nigerian-female"):
+    """Generate speech using Edge TTS (Best Quality)"""
+    if not TTS_ENGINES["edge_available"]:
+        raise Exception("Edge TTS not available")
     
-    def _init_engine(self):
-        # Try pyttsx3 first (most reliable on Windows)
+    voice_config = NIGERIAN_VOICES.get(voice, NIGERIAN_VOICES["nigerian-female"])
+    edge_voice = voice_config["edge"]
+    
+    print(f" Using Edge TTS voice: {edge_voice}")
+    
+    communicate = edge_tts.Communicate(text, edge_voice)
+    
+    with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as tmp_file:
+        tmp_path = tmp_file.name
+    
+    await communicate.save(tmp_path)
+    
+    with open(tmp_path, "rb") as f:
+        audio_data = f.read()
+    
+    os.unlink(tmp_path)
+    return audio_data, "mp3", "edge"
+
+def generate_gtts_speech(text, voice="nigerian-female"):
+    """Generate speech using gTTS (Your Current System)"""
+    if not TTS_ENGINES["gtts_available"]:
+        raise Exception("gTTS not available")
+    
+    voice_config = NIGERIAN_VOICES.get(voice, NIGERIAN_VOICES["nigerian-female"])
+    gtts_config = voice_config["gtts"]
+    
+    print(f" Using gTTS with TLD: {gtts_config['tld']}")
+    
+    # Try multiple TLDs for reliability
+    tlds_to_try = [gtts_config["tld"], "com", "co.uk", "com.au"]
+    
+    for tld in tlds_to_try:
         try:
-            import pyttsx3
-            engine = pyttsx3.init()
-            # Set Nigerian-like voice properties
-            voices = engine.getProperty('voices')
-            if voices:
-                for voice in voices:
-                    if 'en' in voice.id.lower() and ('female' in voice.name.lower() or 'zira' in voice.name.lower()):
-                        engine.setProperty('voice', voice.id)
-                        break
+            tts = gTTS(text=text, lang="en", tld=tld, 
+                      slow=gtts_config.get("slow", False), timeout=10)
             
-            rate = engine.getProperty('rate')
-            engine.setProperty('rate', max(150, rate - 20))  # Slower for Nigerian accent
-            logger.info(" pyttsx3 Nigerian TTS initialized")
-            return engine
-        except Exception as e:
-            logger.warning(f"pyttsx3 failed: {e}")
-        
-        # Try gTTS as fallback
-        try:
-            from gtts import gTTS
-            logger.info(" gTTS fallback initialized")
-            return "gtts"
-        except Exception as e:
-            logger.warning(f"gTTS failed: {e}")
-        
-        logger.info(" Using audio synthesis fallback")
-        return "fallback"
-    
-    def _apply_nigerian_accent(self, text):
-        result = text.lower()
-        for eng, naija in self.naija_replacements.items():
-            result = result.replace(eng, naija)
-        return result
-    
-    def _generate_fallback_audio(self, text):
-        # Generate sophisticated speech-like audio
-        sample_rate = 22050
-        duration = min(len(text) * 0.08 + 0.5, 8.0)
-        
-        samples = []
-        for i in range(int(sample_rate * duration)):
-            t = i / sample_rate
+            with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as tmp_file:
+                tmp_path = tmp_file.name
             
-            # Create formant-like frequencies for speech
-            f1 = 500 + 200 * math.sin(t * 3)
-            f2 = 1500 + 300 * math.sin(t * 5)
-            f3 = 2500 + 400 * math.sin(t * 7)
+            tts.save(tmp_path)
             
-            amplitude = 0.2 * (1 - t/duration) * math.exp(-t*0.5)
+            with open(tmp_path, "rb") as f:
+                audio_data = f.read()
             
-            signal = (
-                0.5 * math.sin(2 * math.pi * f1 * t) +
-                0.3 * math.sin(2 * math.pi * f2 * t) +
-                0.2 * math.sin(2 * math.pi * f3 * t)
-            )
-            
-            # Add noise for naturalness
-            noise = 0.05 * (2 * (hash(str(i)) % 2**32) / 2**32 - 1)
-            
-            sample = int(16383 * amplitude * (signal + noise))
-            samples.append(struct.pack('<h', max(-32768, min(32767, sample))))
-        
-        # Create WAV file
-        audio_data = b''.join(samples)
-        wav_header = struct.pack('<4sI4s', b'RIFF', 36 + len(audio_data), b'WAVE')
-        wav_header += struct.pack('<4sIHHIIHH', b'fmt ', 16, 1, 1, sample_rate, sample_rate * 2, 2, 16)
-        wav_header += struct.pack('<4sI', b'data', len(audio_data))
-        
-        return wav_header + audio_data
-    
-    def generate_speech(self, text, voice="nigerian-female"):
-        self.stats["total_requests"] += 1
-        
-        # Check cache
-        cache_key = hashlib.md5(f"{text}_{voice}".encode()).hexdigest()[:16]
-        cache_file = self.cache_dir / f"{cache_key}.wav"
-        
-        if cache_file.exists():
-            self.stats["cache_hits"] += 1
-            return cache_file.read_bytes(), "wav"
-        
-        try:
-            # Apply Nigerian pronunciation
-            naija_text = self._apply_nigerian_accent(text)
-            
-            if hasattr(self.engine, 'save_to_file'):  # pyttsx3
-                with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as tmp:
-                    tmp_path = tmp.name
-                
-                self.engine.save_to_file(naija_text, tmp_path)
-                self.engine.runAndWait()
-                
-                audio_data = Path(tmp_path).read_bytes()
-                os.unlink(tmp_path)
-                
-            elif self.engine == "gtts":  # gTTS
-                from gtts import gTTS
-                with tempfile.NamedTemporaryFile(suffix='.mp3', delete=False) as tmp:
-                    tmp_path = tmp.name
-                
-                tts = gTTS(text=naija_text, lang='en', tld='com.ng', slow=False)
-                tts.save(tmp_path)
-                
-                audio_data = Path(tmp_path).read_bytes()
-                os.unlink(tmp_path)
-                
-            else:  # Fallback
-                audio_data = self._generate_fallback_audio(text)
-            
-            # Cache the result
-            cache_file.write_bytes(audio_data)
-            
-            logger.info(f" Generated {len(audio_data)} bytes for '{text[:30]}...'")
-            return audio_data, "wav"
+            os.unlink(tmp_path)
+            return audio_data, "mp3", "gtts"
             
         except Exception as e:
-            self.stats["errors"] += 1
-            logger.error(f"Speech generation failed: {e}")
-            # Return fallback audio
-            audio_data = self._generate_fallback_audio(text)
-            return audio_data, "wav"
+            print(f" gTTS TLD {tld} failed: {e}")
+            continue
+    
+    raise Exception("All gTTS attempts failed")
 
-# Initialize TTS
-tts = RealNigerianTTS()
-
-# API Keys
-VALID_KEYS = set(os.getenv("VALID_API_KEYS", "demo,odia_live").split(","))
+def generate_fallback_audio(text):
+    """Emergency fallback - Better than silence"""
+    print(" Using emergency fallback audio")
+    
+    # Generate more natural-sounding fallback
+    sample_rate = 22050
+    duration = min(len(text) * 0.08, 4.0)  # More reasonable duration
+    
+    # Create multiple tones for a more speech-like sound
+    t = np.linspace(0, duration, int(sample_rate * duration))
+    
+    # Base frequency modulated by text content
+    base_freq = 200 + (len(text) % 100)  # Varies with text
+    
+    # Create formant-like structure
+    audio = (0.6 * np.sin(2 * np.pi * base_freq * t) +       # Fundamental
+            0.3 * np.sin(2 * np.pi * base_freq * 2 * t) +     # Second harmonic
+            0.1 * np.sin(2 * np.pi * base_freq * 3 * t))      # Third harmonic
+    
+    # Apply amplitude envelope
+    envelope = np.exp(-2 * t / duration)  # Fade out
+    audio = audio * envelope * 0.3  # Keep volume reasonable
+    
+    # Convert to bytes
+    audio_int16 = (audio * 32767).astype(np.int16)
+    
+    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp_file:
+        sf.write(tmp_file.name, audio_int16, sample_rate)
+        tmp_path = tmp_file.name
+    
+    with open(tmp_path, "rb") as f:
+        audio_data = f.read()
+    
+    os.unlink(tmp_path)
+    return audio_data, "wav", "fallback"
 
 @app.route("/health")
 def health():
+    """Enhanced health check"""
+    # Determine best available engine
+    best_engine = "fallback"
+    if TTS_ENGINES["edge_available"]:
+        best_engine = "edge"
+    elif TTS_ENGINES["gtts_available"]:
+        best_engine = "gtts"
+    
     return jsonify({
-        "service": "ODIA AI Real Nigerian TTS",
-        "status": "operational",
-        "engine": type(tts.engine).__name__ if hasattr(tts.engine, '__name__') else str(tts.engine),
-        "ready_for_business": True,
+        "service": "ODIA Nigerian TTS - Bulletproof Hybrid",
+        "status": "healthy",
         "timestamp": datetime.now(timezone.utc).isoformat(),
-        "stats": tts.stats
-    })
-
-@app.route("/speak", methods=["GET", "POST"])
-def speak():
-    # Get API key
-    api_key = (
-        request.headers.get("x-api-key") or
-        request.args.get("api_key") or
-        (request.json.get("api_key") if request.is_json else None) or
-        "demo"
-    )
-    
-    if api_key not in VALID_KEYS:
-        return jsonify({"error": "Invalid API key"}), 401
-    
-    # Get text and voice
-    if request.method == "POST":
-        data = request.get_json() or {}
-        text = data.get("text", "").strip()
-        voice = data.get("voice", "nigerian-female")
-    else:
-        text = request.args.get("text", "").strip()
-        voice = request.args.get("voice", "nigerian-female")
-    
-    if not text:
-        return jsonify({"error": "Text required"}), 400
-    
-    if len(text) > 3000:
-        return jsonify({"error": "Text too long"}), 413
-    
-    try:
-        # Generate speech
-        audio_data, format_type = tts.generate_speech(text, voice)
-        
-        if len(audio_data) < 100:
-            return jsonify({"error": "Audio generation failed"}), 500
-        
-        response = Response(
-            audio_data,
-            mimetype=f"audio/{format_type}",
-            headers={
-                "Content-Disposition": f'inline; filename="speech.{format_type}"',
-                "X-Audio-Size": str(len(audio_data)),
-                "X-Engine": str(tts.engine)
-            }
-        )
-        
-        logger.info(f" Served {len(audio_data)} bytes of Nigerian TTS")
-        return response
-        
-    except Exception as e:
-        logger.error(f"TTS error: {e}")
-        return jsonify({"error": "TTS generation failed"}), 500
+        "engines": TTS_ENGINES,
+        "primary_engine": best_engine,
+        "quality": "Premium" if best_engine == "edge" else "Good" if best_engine == "gtts" else "Basic",
+        "voices_available": list(NIGERIAN_VOICES.keys()),
+        "api_keys_configured": len(VALID_KEYS),
+        "production_ready": any([TTS_ENGINES["edge_available"], TTS_ENGINES["gtts_available"]])
+    }), 200
 
 @app.route("/voices")
 def voices():
+    """List available Nigerian voices"""
+    voice_list = []
+    for voice_id, config in NIGERIAN_VOICES.items():
+        voice_list.append({
+            "id": voice_id,
+            "name": voice_id.replace("-", " ").title(),
+            "description": f"Nigerian {voice_id.replace('-', ' ')} voice",
+            "edge_voice": config.get("edge"),
+            "quality": "Premium" if TTS_ENGINES["edge_available"] else "Good"
+        })
+    
     return jsonify({
-        "voices": [
-            {"id": "nigerian-female", "name": "Nigerian Female", "language": "English (Nigerian)"},
-            {"id": "nigerian-male", "name": "Nigerian Male", "language": "English (Nigerian)"}
-        ],
-        "total": 2
-    })
+        "voices": voice_list,
+        "count": len(voice_list),
+        "engines": TTS_ENGINES
+    }), 200
+
+@app.route("/speak", methods=["GET", "POST"])
+def speak():
+    """BULLETPROOF TTS Generation - Never Fails"""
+    request_id = f"req_{int(time.time())}"
+    
+    try:
+        print(f" [{request_id}] TTS request started")
+        
+        # Authentication
+        if not check_auth():
+            return jsonify({"error": "Unauthorized"}), 401
+        
+        # Get parameters
+        if request.method == "POST":
+            data = request.get_json() or request.form.to_dict()
+            text = data.get("text", "").strip()
+            voice = data.get("voice", "nigerian-female")
+        else:
+            text = request.args.get("text", "").strip()
+            voice = request.args.get("voice", "nigerian-female")
+        
+        print(f" [{request_id}] Text: '{text[:50]}...' Voice: {voice}")
+        
+        # Validation
+        if not text:
+            return jsonify({"error": "Text parameter required"}), 400
+        if len(text) > 2000:
+            return jsonify({"error": "Text too long (max 2000 chars)"}), 413
+        
+        # TRY ENGINE HIERARCHY (Best to Fallback)
+        audio_data = None
+        audio_format = None
+        engine_used = None
+        last_error = None
+        
+        # 1. Try Edge TTS First (Best Quality)
+        if TTS_ENGINES["edge_available"]:
+            try:
+                import asyncio
+                audio_data, audio_format, engine_used = asyncio.run(
+                    generate_edge_speech(text, voice)
+                )
+                print(f" Edge TTS success: {len(audio_data)} bytes")
+            except Exception as e:
+                last_error = f"Edge TTS failed: {e}"
+                print(f" {last_error}")
+        
+        # 2. Try gTTS (Your Current Working System)
+        if audio_data is None and TTS_ENGINES["gtts_available"]:
+            try:
+                audio_data, audio_format, engine_used = generate_gtts_speech(text, voice)
+                print(f" gTTS success: {len(audio_data)} bytes")
+            except Exception as e:
+                last_error = f"gTTS failed: {e}"
+                print(f" {last_error}")
+        
+        # 3. Emergency Fallback (Always Works)
+        if audio_data is None:
+            try:
+                audio_data, audio_format, engine_used = generate_fallback_audio(text)
+                print(f" Fallback success: {len(audio_data)} bytes")
+            except Exception as e:
+                last_error = f"Fallback failed: {e}"
+                print(f" {last_error}")
+        
+        # Check if we got audio
+        if audio_data is None or len(audio_data) < 100:
+            return jsonify({
+                "error": "All TTS engines failed",
+                "details": last_error,
+                "request_id": request_id
+            }), 500
+        
+        print(f" [{request_id}] Success: {len(audio_data)} bytes via {engine_used}")
+        
+        # Return audio response
+        mimetype = "audio/mpeg" if audio_format == "mp3" else "audio/wav"
+        response = Response(audio_data, mimetype=mimetype)
+        response.headers["Content-Disposition"] = f'inline; filename="speech.{audio_format}"'
+        response.headers["X-Engine-Used"] = engine_used
+        response.headers["X-Request-ID"] = request_id
+        response.headers["X-Audio-Format"] = audio_format
+        response.headers["X-Reliability"] = "Bulletproof"
+        
+        return response
+        
+    except Exception as e:
+        print(f" [{request_id}] CRITICAL ERROR: {e}")
+        print(traceback.format_exc())
+        
+        return jsonify({
+            "error": "TTS system error",
+            "request_id": request_id,
+            "message": str(e)
+        }), 500
 
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 5000))
-    print(" ODIA AI - REAL NIGERIAN TTS ENGINE STARTING...")
-    print(f"Engine: {tts.engine}")
-    print(f"Port: {port}")
+    print("=" * 60)
+    print(" ODIA NIGERIAN TTS - BULLETPROOF HYBRID")
+    print("=" * 60)
+    
+    # Show engine priority
+    if TTS_ENGINES["edge_available"]:
+        print(" Primary: Edge TTS (Premium Quality)")
+    if TTS_ENGINES["gtts_available"]:
+        print(" Backup: gTTS (Internet Required)")
+    print(" Emergency: Fallback (Always Works)")
+    
+    print(f" API Keys: {len(VALID_KEYS)} configured")
+    print(f" Port: {port}")
+    print("=" * 60)
+    
     app.run(host="0.0.0.0", port=port, debug=False)
