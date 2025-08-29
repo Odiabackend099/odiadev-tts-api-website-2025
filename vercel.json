@@ -1,0 +1,11 @@
+{
+  "version": 2,
+  "rewrites": [
+    { "source": "/health", "destination": "/api/healthcheck" },
+    { "source": "/webhook/flutterwave", "destination": "/api/webhook/flutterwave" },
+    { "source": "/webhook/twilio/whatsapp", "destination": "/api/webhook/twilio/whatsapp" },
+    { "source": "/payments/initiate", "destination": "/api/payments/initiate" },
+    { "source": "/tts/speak", "destination": "/api/tts/speak" },
+    { "source": "/agents/deploy", "destination": "/api/agents/deploy" }
+  ]
+}
