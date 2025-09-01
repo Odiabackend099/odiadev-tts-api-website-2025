@@ -1,0 +1,16 @@
+{
+  "name": "ODIADEV Voice",
+  "short_name": "ODIADEV",
+  "description": "Nigerian voices, instant playback, zero fuss. Add an AI assistant with audio to any site.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#ffffff",
+  "theme_color": "#10B981",
+  "icons": [
+    {
+      "src": "/favicon.ico",
+      "sizes": "any",
+      "type": "image/x-icon"
+    }
+  ]
+}
