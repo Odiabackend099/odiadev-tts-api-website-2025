@@ -1,0 +1,36 @@
+// prisma/schema.prisma
+datasource db {
+  provider = "sqlite"
+  url      = "file:./dev.db"
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+model ApiKey {
+  id          String   @id @default(cuid())
+  name        String
+  type        String   // "pk" (public) | "sk" (server)
+  prefix      String   @unique
+  hash        String   // HMAC-SHA256 of full key with server pepper
+  scopes      Json     @default("[]")
+  domainAllow Json     @default("[]") // ["example.com", "sub.mydomain.com"]
+  ratePerMin  Int      @default(60)
+  dailyQuota  Int      @default(2000)
+  createdAt   DateTime @default(now())
+  createdBy   String?
+  revokedAt   DateTime?
+  lastUsedAt  DateTime?
+  usageDay    Int      @default(0)
+  usageCount  Int      @default(0)
+  projectId   String?
+}
+
+model AuditLog {
+  id      String   @id @default(cuid())
+  time    DateTime @default(now())
+  actor   String?
+  action  String
+  payload Json?
+}
