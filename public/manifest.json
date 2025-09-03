@@ -1,0 +1,21 @@
+{
+  "name": "ODIADEV - Voice AI Infrastructure",
+  "short_name": "ODIADEV",
+  "description": "Voice AI infrastructure that powers WhatsApp, Telegram and Web agents",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0C1C3A",
+  "theme_color": "#0C1C3A",
+  "icons": [
+    {
+      "src": "/assets/brand/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png"
+    },
+    {
+      "src": "/assets/brand/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png"
+    }
+  ]
+}

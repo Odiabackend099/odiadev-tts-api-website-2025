@@ -1,0 +1,14 @@
+{
+  "framework": "vite",
+  "buildCommand": "vite build",
+  "devCommand": "vite",
+  "installCommand": "npm install",
+  "outputDirectory": "dist",
+  "env": {
+    "VITE_SUPABASE_URL": "@vite_supabase_url",
+    "VITE_SUPABASE_ANON_KEY": "@vite_supabase_anon_key",
+    "VITE_N8N_API_URL": "@vite_n8n_api_url",
+    "VITE_N8N_API_KEY": "@vite_n8n_api_key",
+    "VITE_OPENAI_API_KEY": "@vite_openai_api_key"
+  }
+}
